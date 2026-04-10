@@ -1,56 +1,153 @@
-import os
-from dotenv import load_dotenv
 from web3 import Web3
-from solcx import compile_source, install_solc
+from solcx import compile_standard, install_solc
+import json
 
-load_dotenv()
+# ── CONFIG ──────────────────────────────────────────────
+RPC_URL     = "http://139.180.188.61:8545"
+CHAIN_ID    = 18441
+PRIVATE_KEY = "e00a3b1061c9eaaf923a3d03fc3e5782398bef80860b58be9cf9c6ce78dc89f7"
+# ────────────────────────────────────────────────────────
 
-RPC_URL = os.getenv("RPC_URL")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
-CHAIN_ID = int(os.getenv("CHAIN_ID", "18441"))
+CONTRACT_SOURCE = """
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-install_solc("0.8.20")
+contract ProofVault {
+    struct Proof {
+        string fileHash;
+        uint256 timestamp;
+        address uploader;
+        string documentTitle;
+        string documentType;
+    }
 
-with open("ProofVault.sol", "r", encoding="utf-8") as f:
-    contract_source = f.read()
+    mapping(string => Proof) private proofs;
+    string[] private allHashes;
 
-compiled_sol = compile_source(
-    contract_source,
-    output_values=["abi", "bin"],
-    solc_version="0.8.20"
-)
+    event HashStored(
+        string fileHash,
+        uint256 timestamp,
+        address uploader,
+        string documentTitle,
+        string documentType
+    );
 
-contract_id, contract_interface = compiled_sol.popitem()
-abi = contract_interface["abi"]
-bytecode = contract_interface["bin"]
+    function storeHash(
+        string memory _fileHash,
+        string memory _documentTitle,
+        string memory _documentType
+    ) public {
+        require(bytes(_fileHash).length > 0, "Empty hash");
+        require(bytes(proofs[_fileHash].fileHash).length == 0, "Hash already stored");
 
-w3 = Web3(Web3.HTTPProvider(RPC_URL))
+        proofs[_fileHash] = Proof({
+            fileHash: _fileHash,
+            timestamp: block.timestamp,
+            uploader: msg.sender,
+            documentTitle: _documentTitle,
+            documentType: _documentType
+        });
 
-if not w3.is_connected():
-    raise Exception("Could not connect to DCAI RPC")
+        allHashes.push(_fileHash);
 
-account = Web3.to_checksum_address(WALLET_ADDRESS)
-nonce = w3.eth.get_transaction_count(account)
+        emit HashStored(_fileHash, block.timestamp, msg.sender, _documentTitle, _documentType);
+    }
 
-ProofVault = w3.eth.contract(abi=abi, bytecode=bytecode)
+    function verifyHash(string memory _fileHash)
+        public view
+        returns (bool exists, uint256 timestamp, address uploader,
+                 string memory documentTitle, string memory documentType)
+    {
+        Proof memory proof = proofs[_fileHash];
+        if (bytes(proof.fileHash).length == 0) {
+            return (false, 0, address(0), "", "");
+        }
+        return (true, proof.timestamp, proof.uploader, proof.documentTitle, proof.documentType);
+    }
 
-tx = ProofVault.constructor().build_transaction({
-    "from": account,
-    "nonce": nonce,
-    "chainId": CHAIN_ID,
-    "gas": 3000000,
-    "gasPrice": w3.eth.gas_price
-})
+    function getProof(string memory _fileHash)
+        public view
+        returns (string memory fileHash, uint256 timestamp, address uploader,
+                 string memory documentTitle, string memory documentType)
+    {
+        require(bytes(proofs[_fileHash].fileHash).length > 0, "Hash not found");
+        Proof memory proof = proofs[_fileHash];
+        return (proof.fileHash, proof.timestamp, proof.uploader, proof.documentTitle, proof.documentType);
+    }
 
-signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+    function getTotalProofs() public view returns (uint256) {
+        return allHashes.length;
+    }
 
-print("Contract deployed!")
-print("Contract address:", receipt.contractAddress)
-print("Tx hash:", tx_hash.hex())
+    function getHashByIndex(uint256 index) public view returns (string memory) {
+        require(index < allHashes.length, "Index out of bounds");
+        return allHashes[index];
+    }
+}
+"""
 
-with open("contract_abi.py", "w", encoding="utf-8") as f:
-    f.write(f"ABI = {abi}\n")
-    f.write(f'CONTRACT_ADDRESS = "{receipt.contractAddress}"\n')
+def main():
+    # 1. Connect
+    w3 = Web3(Web3.HTTPProvider(RPC_URL))
+    assert w3.is_connected(), "Could not connect to RPC"
+    print(" Connected to DCAI chain")
+
+    account = w3.eth.account.from_key(PRIVATE_KEY)
+    print(f" Deploying from: {account.address}")
+
+    balance = w3.eth.get_balance(account.address)
+    print(f" Balance: {w3.from_wei(balance, 'ether')} tDCAI")
+    assert balance > 0, "No gas. Fund this address first."
+
+    # 2. Compile
+    print(" Compiling contract...")
+    install_solc("0.8.20")
+
+    compiled = compile_standard({
+        "language": "Solidity",
+        "sources": {"ProofVault.sol": {"content": CONTRACT_SOURCE}},
+        "settings": {
+            "outputSelection": {
+                "*": {"*": ["abi", "evm.bytecode"]}
+            }
+        }
+    }, solc_version="0.8.20")
+
+    abi      = compiled["contracts"]["ProofVault.sol"]["ProofVault"]["abi"]
+    bytecode = compiled["contracts"]["ProofVault.sol"]["ProofVault"]["evm"]["bytecode"]["object"]
+
+    # 3. Build transaction
+    print(" Deploying...")
+    contract = w3.eth.contract(abi=abi, bytecode=bytecode)
+    nonce    = w3.eth.get_transaction_count(account.address)
+
+    tx = {
+        "chainId":  CHAIN_ID,
+        "from":     account.address,
+        "nonce":    nonce,
+        "gas":      3_000_000,
+        "gasPrice": w3.to_wei("1", "gwei"),
+        "data":     contract.constructor().data_in_transaction,
+    }
+
+    # 4. Sign and send
+    signed   = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+    tx_hash  = w3.eth.send_raw_transaction(signed.raw_transaction)
+    print(f" Tx sent: {tx_hash.hex()}")
+
+    receipt  = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    contract_address = receipt.contractAddress
+    print(f" Contract deployed at: {contract_address}")
+
+    # 5. Save ABI + address
+    with open("contract_address.txt", "w") as f:
+        f.write(contract_address)
+
+    with open("abi.json", "w") as f:
+        json.dump(abi, f, indent=2)
+
+    print(" Saved: contract_address.txt + abi.json")
+    print("\n Done! Your ProofVault is live on DCAI.")
+
+if __name__ == "__main__":
+    main()
