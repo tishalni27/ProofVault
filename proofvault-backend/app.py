@@ -566,9 +566,15 @@ def compare_versions(old_version_id, new_version_id):
         old_path = old_v.get("stored_path")
         new_path = new_v.get("stored_path")
 
-        if not old_path or not os.path.exists(old_path):
-            return jsonify({"error": "Old version file not found"}), 404
-
+        if not old_path:
+            return jsonify({"error": "Old version stored_path missing"}), 404
+        
+        if not os.path.exists(old_path):
+            return jsonify({
+                "error": "Old version file not found",
+                "missing_path": old_path
+            }), 404
+        
         if not new_path or not os.path.exists(new_path):
             return jsonify({"error": "New version file not found"}), 404
 
