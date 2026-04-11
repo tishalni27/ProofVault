@@ -4,6 +4,7 @@ import { useState, useRef } from "react";
 import AppShell from "@/components/AppShell";
 
 const API = "http://127.0.0.1:5001";
+const CHECKER_API = "http://127.0.0.1:5002";
 
 type VerifyResult = {
   filename: string;
