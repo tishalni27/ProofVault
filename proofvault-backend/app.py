@@ -1,11 +1,12 @@
 
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from web3 import Web3
-import hashlib, json, os
+import hashlib, json, os, sqlite3, uuid
 from datetime import datetime, timezone
 from web3.middleware import ExtraDataToPOAMiddleware
+from werkzeug.utils import secure_filename
+
 app = Flask(__name__)
 CORS(app)
 
@@ -16,11 +17,59 @@ WALLET_ADDRESS = "0x09862fe62d534A1E1E9981491cd845E7c4F86f8F"
 PRIVATE_KEY    = "e00a3b1061c9eaaf923a3d03fc3e5782398bef80860b58be9cf9c6ce78dc89f7"
 OPERATOR_REGISTRY = "0xb37c81eBC4b1B4bdD5476fe182D6C72133F41db9"
 CACHE_FILE     = os.path.join(os.path.dirname(__file__), "proofs.json")
+
+BASE_DIR       = os.path.dirname(__file__)
+DB_FILE        = os.path.join(BASE_DIR, "proofvault.db")
+UPLOAD_FOLDER  = os.path.join(BASE_DIR, "uploads")
+CACHE_FILE     = os.path.join(BASE_DIR, "proofs.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0) 
 
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS document_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            version_number INTEGER NOT NULL,
+            file_hash TEXT NOT NULL UNIQUE,
+            tx_hash TEXT,
+            block_number INTEGER,
+            uploaded_at TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            uploader TEXT,
+            previous_version_id INTEGER,
+            is_current INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'registered',
+            FOREIGN KEY (document_id) REFERENCES documents (id),
+            FOREIGN KEY (previous_version_id) REFERENCES document_versions (id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
 
 # ── CACHE ─────────────────────────────────────────────────────────────────────
 
@@ -117,71 +166,185 @@ def home():
     })
 
 
+# @app.route("/upload", methods=["POST"])
+# def upload():
+#     try:
+#         if "file" not in request.files:
+#             return jsonify({"error": "No file provided"}), 400
+
+#         f          = request.files["file"]
+#         file_bytes = f.read()
+#         file_hash  = _sha256(file_bytes)
+#         title      = request.form.get("title", f.filename)
+#         doc_type   = request.form.get("document_type", "Document")
+
+#         # Check if already stored
+#         cache = _load_cache()
+#         if file_hash in cache:
+#             entry = cache[file_hash]
+#             return jsonify({
+#                 "success":          True,
+#                 "already_existed":  True,
+#                 "filename":         f.filename,
+#                 "title":            entry["title"],
+#                 "document_type":    entry["doc_type"],
+#                 "file_hash":        file_hash,
+#                 "tx_hash":          entry["tx_hash"],
+#                 "block_number":     entry["block_number"],
+#                 "operator_registry": OPERATOR_REGISTRY,
+#             })
+
+#         # Send on-chain proof tx
+#         tx_hash, receipt = _send_proof_tx(file_hash, title, doc_type)
+
+#         if receipt.status != 1:
+#             return jsonify({"error": "Transaction failed on-chain", "tx_hash": tx_hash}), 500
+
+#         # Get block timestamp
+#         blk = w3.eth.get_block(receipt.blockNumber)
+#         ts  = blk["timestamp"]
+
+#         # Save to cache
+#         cache[file_hash] = {
+#             "tx_hash":      tx_hash,
+#             "block_number": receipt.blockNumber,
+#             "timestamp":    ts,
+#             "title":        title,
+#             "doc_type":     doc_type,
+#             "filename":     f.filename,
+#             "uploader":     WALLET_ADDRESS,
+#         }
+#         _save_cache(cache)
+
+#         return jsonify({
+#             "success":           True,
+#             "filename":          f.filename,
+#             "title":             title,
+#             "document_type":     doc_type,
+#             "file_hash":         file_hash,
+#             "tx_hash":           tx_hash,
+#             "block_number":      receipt.blockNumber,
+#             "uploaded_at":       _now_utc(ts),
+#             "operator_registry": OPERATOR_REGISTRY,
+#         })
+
+#     except Exception as e:
+#         return jsonify({"error": str(e)}), 500
+
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
         if "file" not in request.files:
             return jsonify({"error": "No file provided"}), 400
 
-        f          = request.files["file"]
+        f = request.files["file"]
         file_bytes = f.read()
-        file_hash  = _sha256(file_bytes)
-        title      = request.form.get("title", f.filename)
-        doc_type   = request.form.get("document_type", "Document")
+        file_hash = _sha256(file_bytes)
 
-        # Check if already stored
-        cache = _load_cache()
-        if file_hash in cache:
-            entry = cache[file_hash]
-            return jsonify({
-                "success":          True,
-                "already_existed":  True,
-                "filename":         f.filename,
-                "title":            entry["title"],
-                "document_type":    entry["doc_type"],
-                "file_hash":        file_hash,
-                "tx_hash":          entry["tx_hash"],
-                "block_number":     entry["block_number"],
-                "operator_registry": OPERATOR_REGISTRY,
-            })
+        title = request.form.get("title", f.filename)
+        doc_type = request.form.get("document_type", "Document")
 
-        # Send on-chain proof tx
+        # Save file locally
+        filename = secure_filename(f.filename)
+        ext = os.path.splitext(filename)[1]
+        stored_name = f"{file_hash}{ext}"
+        stored_path = os.path.join(UPLOAD_FOLDER, stored_name)
+        print("DEBUG upload path:", stored_path)
+
+        with open(stored_path, "wb") as out:
+            out.write(file_bytes)
+
+        print("DEBUG file saved:", os.path.exists(stored_path), stored_path)
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        # Check if document already exists (by title + type)
+        cur.execute(
+            "SELECT * FROM documents WHERE title=? AND document_type=?",
+            (title, doc_type),
+        )
+        doc = cur.fetchone()
+
+        if doc:
+            document_id = doc["id"]
+
+            # Get latest version
+            cur.execute(
+                "SELECT * FROM document_versions WHERE document_id=? AND is_current=1",
+                (document_id,),
+            )
+            prev = cur.fetchone()
+
+            version_number = prev["version_number"] + 1 if prev else 1
+            previous_version_id = prev["id"] if prev else None
+
+            # mark old version as not current
+            if prev:
+                cur.execute(
+                    "UPDATE document_versions SET is_current=0 WHERE id=?",
+                    (prev["id"],),
+                )
+
+        else:
+            # create new document
+            cur.execute(
+                "INSERT INTO documents (title, document_type, created_at) VALUES (?, ?, ?)",
+                (title, doc_type, datetime.utcnow().isoformat()),
+            )
+            document_id = cur.lastrowid
+            version_number = 1
+            previous_version_id = None
+
+        # send blockchain proof
         tx_hash, receipt = _send_proof_tx(file_hash, title, doc_type)
 
         if receipt.status != 1:
-            return jsonify({"error": "Transaction failed on-chain", "tx_hash": tx_hash}), 500
+            return jsonify({"error": "Transaction failed"}), 500
 
-        # Get block timestamp
-        blk = w3.eth.get_block(receipt.blockNumber)
-        ts  = blk["timestamp"]
+        block_number = receipt.blockNumber
+        blk = w3.eth.get_block(block_number)
+        ts = blk["timestamp"]
 
-        # Save to cache
-        cache[file_hash] = {
-            "tx_hash":      tx_hash,
-            "block_number": receipt.blockNumber,
-            "timestamp":    ts,
-            "title":        title,
-            "doc_type":     doc_type,
-            "filename":     f.filename,
-            "uploader":     WALLET_ADDRESS,
-        }
-        _save_cache(cache)
+        # insert version
+        cur.execute(
+            """
+            INSERT INTO document_versions
+            (document_id, version_number, file_hash, tx_hash, block_number,
+             uploaded_at, filename, stored_path, uploader, previous_version_id, is_current)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                document_id,
+                version_number,
+                file_hash,
+                tx_hash,
+                block_number,
+                _now_utc(ts),
+                filename,
+                stored_path,
+                WALLET_ADDRESS,
+                previous_version_id,
+            ),
+        )
+
+        conn.commit()
+        conn.close()
 
         return jsonify({
-            "success":           True,
-            "filename":          f.filename,
-            "title":             title,
-            "document_type":     doc_type,
-            "file_hash":         file_hash,
-            "tx_hash":           tx_hash,
-            "block_number":      receipt.blockNumber,
-            "uploaded_at":       _now_utc(ts),
-            "operator_registry": OPERATOR_REGISTRY,
+            "success": True,
+            "filename": filename,
+            "title": title,
+            "document_type": doc_type,
+            "file_hash": file_hash,
+            "tx_hash": tx_hash,
+            "block_number": block_number,
+            "uploaded_at": _now_utc(ts),
+            "version": version_number,
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/verify", methods=["POST"])
 def verify():
@@ -271,6 +434,7 @@ def list_proofs():
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    init_db()
     print(f"Chain connected  : {w3.is_connected()}")
     print(f"Wallet           : {WALLET_ADDRESS}")
     print(f"OperatorRegistry : {OPERATOR_REGISTRY}")
