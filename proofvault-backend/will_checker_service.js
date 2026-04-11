@@ -3,6 +3,9 @@ const multer = require("multer");
 const pdf = require("pdf-parse");
 
 const app = express();
+const cors = require("cors");
+app.use(cors());
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 const PLACEHOLDER_PATTERNS = [

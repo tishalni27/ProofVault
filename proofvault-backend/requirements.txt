@@ -1,0 +1,8 @@
+flask
+flask-cors
+web3
+pypdf
+werkzeug
+requests
+supabase
+python-dotenv
