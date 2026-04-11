@@ -1,4 +1,18 @@
+"use client";
+
+import { useEffect } from "react";
+import { signOut } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+import Navbar from "@/components/Navbar";
+
+
 export default function Home() {
+  useEffect(() => {
+    signOut(auth).catch((error) => {
+      console.error("Auto logout failed:", error);
+    });
+  }, []);
+
   const stats = [
     { label: "Documents Secured", value: "12.4K+" },
     { label: "Verifications Completed", value: "48.9K+" },
@@ -43,6 +57,8 @@ export default function Home() {
   ];
 
   return (
+    <>
+    <Navbar />
     <main className="min-h-screen overflow-hidden bg-[#eff6ff] text-[#0f172a]">
       <section className="relative isolate">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.25),_transparent_32%),radial-gradient(circle_at_top_right,_rgba(37,99,235,0.25),_transparent_28%),linear-gradient(180deg,#0f172a_0%,#1e3a8a_50%,#2563eb_100%)]" />
@@ -66,13 +82,13 @@ export default function Home() {
 
               <div className="mt-10 flex flex-wrap gap-4">
                 <a
-                  href="/upload"
+                  href="/login"
                   className="w-[180px] text-center rounded-2xl bg-[#3b82f6] px-6 py-4 text-sm font-semibold text-white shadow-xl shadow-blue-900/30 transition hover:-translate-y-0.5 hover:bg-[#2563eb]"
                 >
                   Login
                 </a>
                 <a
-                  href="/verify"
+                  href="/register"
                   className="w-[180px] text-center rounded-2xl border border-white/20 bg-white/5 px-6 py-4 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/10"
                 >
                   Create Account
@@ -230,10 +246,10 @@ export default function Home() {
 
           <div className="mt-8 flex flex-wrap justify-center gap-4">
             <a
-              href="/upload"
+              href="/login"
               className="rounded-2xl bg-white px-7 py-4 text-sm font-semibold text-[#1e3a8a] transition hover:-translate-y-0.5"
             >
-              Register a Proof
+              Login
             </a>
             <a
               href="/verify"
@@ -245,5 +261,6 @@ export default function Home() {
         </div>
       </section>
     </main>
+    </>
   );
 }

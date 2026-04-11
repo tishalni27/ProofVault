@@ -4,7 +4,7 @@ import { useState } from "react";
 import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { useRouter } from "next/navigation";
-
+import Navbar from "@/components/Navbar";
 export default function LoginPage() {
   const router = useRouter();
 
@@ -30,7 +30,10 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="min-h-screen bg-[#eff6ff] flex items-center justify-center px-6 py-16">
+    <>
+    <Navbar />
+    
+    <main className="pt-20 min-h-screen bg-[#eff6ff] flex items-center justify-center px-6 py-16">
       <div className="grid w-full max-w-6xl overflow-hidden rounded-[32px] bg-white shadow-[0_25px_80px_rgba(37,99,235,0.10)] lg:grid-cols-2">
         <section className="hidden lg:flex flex-col justify-between bg-gradient-to-br from-[#0f172a] via-[#1e3a8a] to-[#2563eb] p-12 text-white">
           <div>
@@ -147,5 +150,6 @@ export default function LoginPage() {
         </section>
       </div>
     </main>
+    </>
   );
 }

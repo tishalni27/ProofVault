@@ -6,6 +6,7 @@ import AppShell from "@/components/AppShell";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import { useAuth } from "@/context/AuthContext";
 
+
 const API = "http://127.0.0.1:5001";
 const CHECKER_API = "http://127.0.0.1:5002";
 
@@ -130,7 +131,7 @@ export default function UploadPage() {
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [pageLoading, setPageLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [checkResult, setCheckResult] = useState<CheckResult | null>(null);
   const [error, setError] = useState("");

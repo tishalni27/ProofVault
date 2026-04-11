@@ -124,6 +124,7 @@ import { createUserWithEmailAndPassword } from "firebase/auth";
 import { ref, set } from "firebase/database";
 import { auth, db } from "@/lib/firebase";
 import { useRouter } from "next/navigation";
+import Navbar from "@/components/Navbar";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -183,6 +184,8 @@ export default function RegisterPage() {
   };
 
   return (
+    <>
+    <Navbar />
     <main className="min-h-screen bg-gradient-to-br from-[#0f172a] via-[#1e3a8a] to-[#3b82f6] px-6 pt-32 pb-16">
       <div className="mx-auto w-full max-w-5xl rounded-[32px] bg-white p-8 shadow-[0_25px_80px_rgba(37,99,235,0.15)] sm:p-12">
         <div className="mb-10 text-center">
@@ -315,5 +318,6 @@ export default function RegisterPage() {
         </form>
       </div>
     </main>
+    </>
   );
 }
