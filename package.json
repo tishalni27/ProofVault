@@ -1,0 +1,27 @@
+{
+  "name": "proofvault",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tishalni27/ProofVault.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/tishalni27/ProofVault/issues"
+  },
+  "homepage": "https://github.com/tishalni27/ProofVault#readme",
+  "description": "",
+  "dependencies": {
+    "express": "^5.2.1",
+    "form-data": "^4.0.5",
+    "multer": "^2.1.1",
+    "node-fetch": "^2.7.0",
+    "pdf-parse": "^2.4.5"
+  }
+}
