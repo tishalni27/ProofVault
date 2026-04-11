@@ -1,6 +1,6 @@
 const express = require("express");
 const multer = require("multer");
-const { PDFParse } = require("pdf-parse");
+const pdf = require("pdf-parse");
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -230,14 +230,8 @@ function scoreDocument(
 }
 
 async function extractPdfText(buffer) {
-  const parser = new PDFParse({ data: buffer });
-
-  try {
-    const result = await parser.getText();
-    return result?.text || "";
-  } finally {
-    await parser.destroy();
-  }
+  const result = await pdf(buffer);
+  return result?.text || "";
 }
 
 async function analyzeWillPdf(buffer) {
