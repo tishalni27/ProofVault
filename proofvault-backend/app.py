@@ -1,12 +1,14 @@
 import requests
 import re
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from web3 import Web3
 import hashlib, json, os, sqlite3, uuid
 from datetime import datetime, timezone
 from web3.middleware import ExtraDataToPOAMiddleware
 from werkzeug.utils import secure_filename
+import difflib
+from pypdf import PdfReader
 
 app = Flask(__name__)
 CORS(app)
@@ -198,6 +200,19 @@ def rtdb_delete(path: str):
     res.raise_for_status()
     return res.json()
 
+def extract_pdf_text(path: str) -> str:
+    reader = PdfReader(path)
+    text_parts = []
+
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        text_parts.append(text)
+
+    return "\n".join(text_parts)
+
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -290,6 +305,13 @@ def upload():
         doc_type = request.form.get("document_type", "Document")
         filename = secure_filename(f.filename)
 
+        ext = os.path.splitext(filename)[1].lower()
+        stored_name = f"{file_hash}{ext}"
+        stored_path = os.path.join(UPLOAD_FOLDER, stored_name)
+
+        with open(stored_path, "wb") as out:
+            out.write(file_bytes)
+
         # duplicate by hash
         existing_version_id = rtdb_get(f"hash_index/{file_hash}")
         if existing_version_id:
@@ -347,6 +369,7 @@ def upload():
             "block_number": block_number,
             "uploaded_at": uploaded_at,
             "filename": filename,
+            "stored_path": stored_path,
             "uploader": WALLET_ADDRESS,
             "previous_version_id": previous_version_id,
             "is_current": True,
@@ -506,6 +529,76 @@ def history(document_id):
             "document_type": doc.get("document_type", ""),
             "current_version_id": doc.get("current_version_id"),
             "versions": versions
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+
+@app.route("/file/<version_id>", methods=["GET"])
+def get_file(version_id):
+    try:
+        version = rtdb_get(f"document_versions/{version_id}")
+        if not version:
+            return jsonify({"error": "Version not found"}), 404
+
+        stored_path = version.get("stored_path")
+        if not stored_path or not os.path.exists(stored_path):
+            return jsonify({"error": "Stored file not found"}), 404
+
+        return send_file(stored_path, as_attachment=False)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+
+    
+    
+@app.route("/compare/<old_version_id>/<new_version_id>", methods=["GET"])
+def compare_versions(old_version_id, new_version_id):
+    try:
+        old_v = rtdb_get(f"document_versions/{old_version_id}")
+        new_v = rtdb_get(f"document_versions/{new_version_id}")
+
+        if not old_v or not new_v:
+            return jsonify({"error": "One or both versions not found"}), 404
+
+        old_path = old_v.get("stored_path")
+        new_path = new_v.get("stored_path")
+
+        if not old_path or not os.path.exists(old_path):
+            return jsonify({"error": "Old version file not found"}), 404
+
+        if not new_path or not os.path.exists(new_path):
+            return jsonify({"error": "New version file not found"}), 404
+
+        old_text = extract_pdf_text(old_path)
+        new_text = extract_pdf_text(new_path)
+
+        old_lines = old_text.splitlines()
+        new_lines = new_text.splitlines()
+
+        diff = list(difflib.ndiff(old_lines, new_lines))
+
+        old_diff = []
+        new_diff = []
+
+        for line in diff:
+            if line.startswith("- "):
+                old_diff.append({"type": "removed", "text": line[2:]})
+            elif line.startswith("+ "):
+                new_diff.append({"type": "added", "text": line[2:]})
+            elif line.startswith("  "):
+                old_diff.append({"type": "same", "text": line[2:]})
+                new_diff.append({"type": "same", "text": line[2:]})
+
+        return jsonify({
+            "old_version_id": old_version_id,
+            "new_version_id": new_version_id,
+            "old_file_url": f"http://127.0.0.1:5001/file/{old_version_id}",
+            "new_file_url": f"http://127.0.0.1:5001/file/{new_version_id}",
+            "old_diff": old_diff,
+            "new_diff": new_diff
         })
 
     except Exception as e:

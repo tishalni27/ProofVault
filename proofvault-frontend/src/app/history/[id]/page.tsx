@@ -61,7 +61,7 @@ export default function HistoryPage() {
 
   return (
     <AppShell>
-      <div className="max-w-3xl">
+      <div className="max-w-4xl">
         <h1 className="text-2xl font-semibold text-[#22333B] mb-2">
           Document History
         </h1>
@@ -113,6 +113,26 @@ export default function HistoryPage() {
                     <p className="text-sm text-gray-600 break-all">
                       Hash: {v.file_hash}
                     </p>
+
+                    <div className="mt-3 flex gap-2 flex-wrap">
+                      <a
+                        href={`http://127.0.0.1:5001/file/${v.version_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs px-3 py-2 border border-[#22333B] rounded-md hover:bg-gray-100 transition"
+                      >
+                        View PDF
+                      </a>
+
+                      {v.previous_version_id && (
+                        <a
+                          href={`/compare/${v.previous_version_id}/${v.version_id}`}
+                          className="text-xs px-3 py-2 border border-[#22333B] rounded-md hover:bg-gray-100 transition"
+                        >
+                          Compare with Previous
+                        </a>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
