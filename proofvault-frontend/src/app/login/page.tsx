@@ -1,9 +1,37 @@
+"use client";
+
+import { useState } from "react";
+import { signInWithEmailAndPassword } from "firebase/auth";
+import { auth } from "@/lib/firebase";
+import { useRouter } from "next/navigation";
+
 export default function LoginPage() {
+  const router = useRouter();
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+
+    try {
+      setLoading(true);
+      await signInWithEmailAndPassword(auth, email, password);
+      router.push("/dashboard");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Login failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-[#eff6ff] flex items-center justify-center px-6 py-16">
       <div className="grid w-full max-w-6xl overflow-hidden rounded-[32px] bg-white shadow-[0_25px_80px_rgba(37,99,235,0.10)] lg:grid-cols-2">
-        
-        {/* Left Side */}
         <section className="hidden lg:flex flex-col justify-between bg-gradient-to-br from-[#0f172a] via-[#1e3a8a] to-[#2563eb] p-12 text-white">
           <div>
             <div className="flex items-center gap-3">
@@ -44,7 +72,6 @@ export default function LoginPage() {
           </div>
         </section>
 
-        {/* Right Side */}
         <section className="flex items-center justify-center p-8 sm:p-12">
           <div className="w-full max-w-md">
             <p className="text-sm font-semibold uppercase tracking-[0.24em] text-[#2563eb]">
@@ -57,36 +84,41 @@ export default function LoginPage() {
               Continue to your dashboard and manage your proof records securely.
             </p>
 
-            <form className="mt-10 space-y-5">
-              
-              {/* Email */}
+            <form className="mt-10 space-y-5" onSubmit={handleLogin}>
               <div>
                 <label className="mb-2 block text-sm font-medium text-[#0f172a]">
                   Email address
                 </label>
                 <input
                   type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   placeholder="Enter your email"
                   className="w-full rounded-2xl border border-[#dbeafe] bg-[#f8fafc] px-4 py-3 text-[#0f172a] outline-none transition focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/20"
                 />
               </div>
 
-              {/* Password */}
               <div>
                 <label className="mb-2 block text-sm font-medium text-[#0f172a]">
                   Password
                 </label>
                 <input
                   type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   placeholder="Enter your password"
                   className="w-full rounded-2xl border border-[#dbeafe] bg-[#f8fafc] px-4 py-3 text-[#0f172a] outline-none transition focus:border-[#3b82f6] focus:ring-4 focus:ring-[#3b82f6]/20"
                 />
               </div>
 
-              {/* Options */}
               <div className="flex items-center justify-between text-sm">
                 <label className="flex items-center gap-2 text-[#475569]">
-                  <input type="checkbox" className="rounded border-[#cbd5f5]" />
+                  <input
+                    type="checkbox"
+                    checked={remember}
+                    onChange={(e) => setRemember(e.target.checked)}
+                    className="rounded border-[#cbd5f5]"
+                  />
                   Remember me
                 </label>
                 <a href="#" className="font-medium text-[#2563eb] hover:underline">
@@ -94,12 +126,14 @@ export default function LoginPage() {
                 </a>
               </div>
 
-              {/* Button */}
+              {error && <p className="text-sm text-red-600">{error}</p>}
+
               <button
                 type="submit"
-                className="w-full rounded-2xl bg-gradient-to-r from-[#3b82f6] to-[#2563eb] px-5 py-3.5 font-semibold text-white transition hover:scale-[1.02] hover:shadow-blue-500/30"
+                disabled={loading}
+                className="w-full rounded-2xl bg-gradient-to-r from-[#3b82f6] to-[#2563eb] px-5 py-3.5 font-semibold text-white transition hover:scale-[1.02] hover:shadow-blue-500/30 disabled:opacity-50"
               >
-                Sign In
+                {loading ? "Signing in..." : "Sign In"}
               </button>
             </form>
 
