@@ -11,26 +11,28 @@ import difflib
 from pypdf import PdfReader
 import io
 from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-RPC_URL        = "http://139.180.188.61:8545"
-CHAIN_ID       = 18441
-WALLET_ADDRESS = "0x09862fe62d534A1E1E9981491cd845E7c4F86f8F"
-PRIVATE_KEY    = "e00a3b1061c9eaaf923a3d03fc3e5782398bef80860b58be9cf9c6ce78dc89f7"
-OPERATOR_REGISTRY = "0xb37c81eBC4b1B4bdD5476fe182D6C72133F41db9"
+# ── CONFIG (loaded from .env) ─────────────────────────────────────────────────
+RPC_URL           = os.getenv("RPC_URL")
+CHAIN_ID          = int(os.getenv("CHAIN_ID", 18441))
+WALLET_ADDRESS    = os.getenv("WALLET_ADDRESS")
+PRIVATE_KEY       = os.getenv("PRIVATE_KEY")
+OPERATOR_REGISTRY = os.getenv("OPERATOR_REGISTRY")
+RTDB_URL          = os.getenv("RTDB_URL")
+SUPABASE_URL      = os.getenv("SUPABASE_URL")
+SUPABASE_KEY      = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET   = os.getenv("SUPABASE_BUCKET", "documents")
 
-BASE_DIR       = os.path.dirname(__file__)
-DB_FILE        = os.path.join(BASE_DIR, "proofvault.db")
-UPLOAD_FOLDER  = os.path.join(BASE_DIR, "uploads")
-CACHE_FILE     = os.path.join(BASE_DIR, "proofs.json")
-RTDB_URL       = "https://proofvault-a11d3-default-rtdb.asia-southeast1.firebasedatabase.app/"
-
-SUPABASE_URL   = "https://wuqdwdobnaiywfguvdda.supabase.co"
-SUPABASE_KEY   = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind1cWR3ZG9ibmFpeXdmZ3V2ZGRhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTg4OTQ1MCwiZXhwIjoyMDkxNDY1NDUwfQ.CHC4NKYQa72yfSnA9vKw6CwKpJjisGogCKc9glm4N1A"
-SUPABASE_BUCKET = "documents"
+BASE_DIR      = os.path.dirname(__file__)
+DB_FILE       = os.path.join(BASE_DIR, "proofvault.db")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+CACHE_FILE    = os.path.join(BASE_DIR, "proofs.json")
 # ─────────────────────────────────────────────────────────────────────────────
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
@@ -102,44 +104,28 @@ def _save_cache(cache: dict):
 def supabase_upload(file_bytes: bytes, file_hash: str, ext: str) -> str:
     """Upload file to Supabase Storage, return public URL."""
     stored_name = f"{file_hash}{ext}"
-
-    # Check if already exists in Supabase (upsert)
     try:
         supabase.storage.from_(SUPABASE_BUCKET).upload(
             path=stored_name,
             file=file_bytes,
             file_options={"content-type": "application/pdf", "upsert": "true"}
         )
-    except Exception as e:
-        # If file already exists that's fine, we just need the URL
+    except Exception:
+        # File already exists in Supabase — that's fine
         pass
 
-    public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(stored_name)
-    return public_url
+    return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(stored_name)
 
 
 def supabase_download(file_hash: str, ext: str) -> bytes:
     """Download file bytes from Supabase Storage."""
     stored_name = f"{file_hash}{ext}"
-    data = supabase.storage.from_(SUPABASE_BUCKET).download(stored_name)
-    return data
+    return supabase.storage.from_(SUPABASE_BUCKET).download(stored_name)
 
 
 def extract_pdf_text_from_bytes(file_bytes: bytes) -> str:
     """Extract text from PDF bytes (no local file needed)."""
     reader = PdfReader(io.BytesIO(file_bytes))
-    text_parts = []
-    for page in reader.pages:
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-        text_parts.append(text)
-    return "\n".join(text_parts)
-
-
-def extract_pdf_text(path: str) -> str:
-    reader = PdfReader(path)
     text_parts = []
     for page in reader.pages:
         try:
@@ -317,8 +303,8 @@ def upload():
             "document_id": document_id,
             "version_number": version_number,
             "file_hash": file_hash,
-            "file_url": file_url,        # ← Supabase URL instead of local stored_path
-            "file_ext": ext,             # ← store ext for downloads
+            "file_url": file_url,
+            "file_ext": ext,
             "tx_hash": tx_hash,
             "block_number": block_number,
             "uploaded_at": uploaded_at,
