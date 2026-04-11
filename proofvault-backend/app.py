@@ -343,7 +343,7 @@ def upload():
             "uploaded_at": uploaded_at,
             "filename": filename,
             "uploader": WALLET_ADDRESS,
-            "stored_path": stored_path,
+            "stored_path": file_url,
             "uploaded_by_uid": uploaded_by_uid,
             "uploader_wallet": WALLET_ADDRESS,
             "previous_version_id": previous_version_id,
