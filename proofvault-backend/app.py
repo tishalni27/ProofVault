@@ -226,71 +226,6 @@ def home():
     })
 
 
-# @app.route("/upload", methods=["POST"])
-# def upload():
-#     try:
-#         if "file" not in request.files:
-#             return jsonify({"error": "No file provided"}), 400
-
-#         f          = request.files["file"]
-#         file_bytes = f.read()
-#         file_hash  = _sha256(file_bytes)
-#         title      = request.form.get("title", f.filename)
-#         doc_type   = request.form.get("document_type", "Document")
-
-#         # Check if already stored
-#         cache = _load_cache()
-#         if file_hash in cache:
-#             entry = cache[file_hash]
-#             return jsonify({
-#                 "success":          True,
-#                 "already_existed":  True,
-#                 "filename":         f.filename,
-#                 "title":            entry["title"],
-#                 "document_type":    entry["doc_type"],
-#                 "file_hash":        file_hash,
-#                 "tx_hash":          entry["tx_hash"],
-#                 "block_number":     entry["block_number"],
-#                 "operator_registry": OPERATOR_REGISTRY,
-#             })
-
-#         # Send on-chain proof tx
-#         tx_hash, receipt = _send_proof_tx(file_hash, title, doc_type)
-
-#         if receipt.status != 1:
-#             return jsonify({"error": "Transaction failed on-chain", "tx_hash": tx_hash}), 500
-
-#         # Get block timestamp
-#         blk = w3.eth.get_block(receipt.blockNumber)
-#         ts  = blk["timestamp"]
-
-#         # Save to cache
-#         cache[file_hash] = {
-#             "tx_hash":      tx_hash,
-#             "block_number": receipt.blockNumber,
-#             "timestamp":    ts,
-#             "title":        title,
-#             "doc_type":     doc_type,
-#             "filename":     f.filename,
-#             "uploader":     WALLET_ADDRESS,
-#         }
-#         _save_cache(cache)
-
-#         return jsonify({
-#             "success":           True,
-#             "filename":          f.filename,
-#             "title":             title,
-#             "document_type":     doc_type,
-#             "file_hash":         file_hash,
-#             "tx_hash":           tx_hash,
-#             "block_number":      receipt.blockNumber,
-#             "uploaded_at":       _now_utc(ts),
-#             "operator_registry": OPERATOR_REGISTRY,
-#         })
-
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
@@ -303,6 +238,23 @@ def upload():
 
         title = request.form.get("title", f.filename)
         doc_type = request.form.get("document_type", "Document")
+        uploaded_by_uid = request.form.get("uploaded_by_uid")
+        client_uid = request.form.get("client_uid")
+
+        if not uploaded_by_uid:
+            return jsonify({"error": "Missing uploaded_by_uid"}), 400
+
+        if not client_uid:
+            return jsonify({"error": "Missing client_uid"}), 400
+
+        uploader_profile = rtdb_get(f"users/{uploaded_by_uid}") or {}
+        if uploader_profile.get("role") != "lawyer":
+            return jsonify({"error": "Only lawyers can upload"}), 403
+
+        client_profile = rtdb_get(f"users/{client_uid}") or {}
+        if client_profile.get("role") != "client":
+            return jsonify({"error": "Selected client is invalid"}), 400
+        
         filename = secure_filename(f.filename)
 
         ext = os.path.splitext(filename)[1].lower()
@@ -341,13 +293,29 @@ def upload():
                 "title": title,
                 "document_type": doc_type,
                 "created_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-                "current_version_id": None
+                "current_version_id": None,
+                "owner_lawyer_uid": uploaded_by_uid,
+                "client_uid": client_uid,
+                "collaborator_uids": {
+                    client_uid: True
+                },
+                "status": "active"
             })
             document_id = created["name"]
             rtdb_put(f"document_lookup/{lookup_key}", document_id)
+
+            # give dashboard access to lawyer + client
+            rtdb_put(f"user_documents/{uploaded_by_uid}/{document_id}", True)
+            rtdb_put(f"user_documents/{client_uid}/{document_id}", True)
+
         else:
             doc = rtdb_get(f"documents/{document_id}") or {}
             previous_version_id = doc.get("current_version_id")
+
+            # optional safety: only current owner lawyer can upload new versions
+            if doc.get("owner_lawyer_uid") != uploaded_by_uid:
+                return jsonify({"error": "Only the assigned lawyer can upload new versions"}), 403
+
             if previous_version_id:
                 prev = rtdb_get(f"document_versions/{previous_version_id}") or {}
                 version_number = int(prev.get("version_number", 1)) + 1
@@ -370,7 +338,8 @@ def upload():
             "uploaded_at": uploaded_at,
             "filename": filename,
             "stored_path": stored_path,
-            "uploader": WALLET_ADDRESS,
+            "uploaded_by_uid": uploaded_by_uid,
+            "uploader_wallet": WALLET_ADDRESS,
             "previous_version_id": previous_version_id,
             "is_current": True,
             "status": "registered"
@@ -461,10 +430,18 @@ def stats():
 @app.route("/proofs", methods=["GET"])
 def list_proofs():
     try:
-        documents = rtdb_get("documents") or {}
+        user_uid = request.args.get("user_uid")
+        if not user_uid:
+            return jsonify({"error": "Missing user_uid"}), 400
+
+        document_map = rtdb_get(f"user_documents/{user_uid}") or {}
         proofs = []
 
-        for document_id, doc in documents.items():
+        for document_id in document_map.keys():
+            doc = rtdb_get(f"documents/{document_id}")
+            if not doc:
+                continue
+
             current_version_id = doc.get("current_version_id")
             if not current_version_id:
                 continue
@@ -482,7 +459,9 @@ def list_proofs():
                 "uploaded_at": version.get("uploaded_at"),
                 "block_number": version.get("block_number"),
                 "tx_hash": version.get("tx_hash", ""),
-                "version_number": version.get("version_number", 1)
+                "version_number": version.get("version_number", 1),
+                "owner_lawyer_uid": doc.get("owner_lawyer_uid"),
+                "client_uid": doc.get("client_uid")
             })
 
         proofs.sort(key=lambda x: x.get("block_number") or 0, reverse=True)
@@ -491,67 +470,6 @@ def list_proofs():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
-@app.route("/history/<document_id>", methods=["GET"])
-def history(document_id):
-    try:
-        doc = rtdb_get(f"documents/{document_id}")
-        if not doc:
-            return jsonify({"error": "Document not found"}), 404
-
-        version_map = rtdb_get(f"document_versions_by_document/{document_id}") or {}
-        versions = []
-
-        for version_id in version_map.keys():
-            version = rtdb_get(f"document_versions/{version_id}")
-            if not version:
-                continue
-
-            versions.append({
-                "version_id": version_id,
-                "version_number": version.get("version_number", 1),
-                "file_hash": version.get("file_hash"),
-                "tx_hash": version.get("tx_hash"),
-                "block_number": version.get("block_number"),
-                "uploaded_at": version.get("uploaded_at"),
-                "filename": version.get("filename"),
-                "uploader": version.get("uploader"),
-                "previous_version_id": version.get("previous_version_id"),
-                "is_current": version.get("is_current", False),
-                "status": version.get("status", "registered")
-            })
-
-        versions.sort(key=lambda x: x.get("version_number", 0), reverse=True)
-
-        return jsonify({
-            "document_id": document_id,
-            "title": doc.get("title", ""),
-            "document_type": doc.get("document_type", ""),
-            "current_version_id": doc.get("current_version_id"),
-            "versions": versions
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
-
-@app.route("/file/<version_id>", methods=["GET"])
-def get_file(version_id):
-    try:
-        version = rtdb_get(f"document_versions/{version_id}")
-        if not version:
-            return jsonify({"error": "Version not found"}), 404
-
-        stored_path = version.get("stored_path")
-        if not stored_path or not os.path.exists(stored_path):
-            return jsonify({"error": "Stored file not found"}), 404
-
-        return send_file(stored_path, as_attachment=False)
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
-
     
     
 @app.route("/compare/<old_version_id>/<new_version_id>", methods=["GET"])
@@ -600,6 +518,112 @@ def compare_versions(old_version_id, new_version_id):
             "old_diff": old_diff,
             "new_diff": new_diff
         })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+
+@app.route("/users/clients", methods=["GET"])
+def list_clients():
+    try:
+        users = rtdb_get("users") or {}
+        clients = []
+
+        for uid, user in users.items():
+            if user.get("role") == "client":
+                clients.append({
+                    "uid": uid,
+                    "full_name": user.get("full_name", ""),
+                    "email": user.get("email", "")
+                })
+
+        clients.sort(key=lambda x: x["full_name"].lower())
+        return jsonify({"clients": clients})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500 
+    
+
+@app.route("/documents/<document_id>/transfer", methods=["POST"])
+def transfer_document_ownership(document_id):
+    try:
+        data = request.get_json()
+
+        current_lawyer_uid = data.get("current_lawyer_uid")
+        new_lawyer_uid = data.get("new_lawyer_uid")
+        remove_old_lawyer_access = data.get("remove_old_lawyer_access", True)
+
+        if not current_lawyer_uid or not new_lawyer_uid:
+            return jsonify({"error": "Missing current_lawyer_uid or new_lawyer_uid"}), 400
+
+        doc = rtdb_get(f"documents/{document_id}")
+        if not doc:
+            return jsonify({"error": "Document not found"}), 404
+
+        if doc.get("owner_lawyer_uid") != current_lawyer_uid:
+            return jsonify({"error": "Only the current owner lawyer can transfer ownership"}), 403
+
+        current_profile = rtdb_get(f"users/{current_lawyer_uid}") or {}
+        new_profile = rtdb_get(f"users/{new_lawyer_uid}") or {}
+
+        if current_profile.get("role") != "lawyer":
+            return jsonify({"error": "Current user is not a lawyer"}), 400
+
+        if new_profile.get("role") != "lawyer":
+            return jsonify({"error": "New owner must be a lawyer"}), 400
+
+        if current_lawyer_uid == new_lawyer_uid:
+            return jsonify({"error": "New lawyer must be different from current lawyer"}), 400
+
+        transferred_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        # update owner
+        rtdb_patch(f"documents/{document_id}", {
+            "owner_lawyer_uid": new_lawyer_uid
+        })
+
+        # give new lawyer access
+        rtdb_put(f"user_documents/{new_lawyer_uid}/{document_id}", True)
+
+        # optionally remove old lawyer access
+        if remove_old_lawyer_access:
+            rtdb_delete(f"user_documents/{current_lawyer_uid}/{document_id}")
+
+        # audit log
+        transfer_event = {
+            "from_lawyer_uid": current_lawyer_uid,
+            "to_lawyer_uid": new_lawyer_uid,
+            "transferred_at": transferred_at
+        }
+        rtdb_post(f"documents/{document_id}/ownership_history", transfer_event)
+
+        return jsonify({
+            "success": True,
+            "document_id": document_id,
+            "old_owner_lawyer_uid": current_lawyer_uid,
+            "new_owner_lawyer_uid": new_lawyer_uid,
+            "transferred_at": transferred_at
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route("/users/lawyers", methods=["GET"])
+def list_lawyers():
+    try:
+        users = rtdb_get("users") or {}
+        lawyers = []
+
+        for uid, user in users.items():
+            if user.get("role") == "lawyer":
+                lawyers.append({
+                    "uid": uid,
+                    "full_name": user.get("full_name", ""),
+                    "email": user.get("email", "")
+                })
+
+        lawyers.sort(key=lambda x: x["full_name"].lower())
+        return jsonify({"lawyers": lawyers})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

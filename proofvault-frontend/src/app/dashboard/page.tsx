@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import AppShell from "@/components/AppShell";
 import DocumentCard from "@/components/DocumentCard";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import { useAuth } from "@/context/AuthContext";
 
 const API = "http://127.0.0.1:5001";
 
@@ -17,6 +18,8 @@ type Proof = {
   block_number: number;
   tx_hash: string;
   version_number?: number;
+  owner_lawyer_uid?: string;
+  client_uid?: string;
 };
 
 export default function Dashboard() {
@@ -25,11 +28,15 @@ export default function Dashboard() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("All Types");
-
+  const { user, profile, loading: authLoading } = useAuth();
+  
   useEffect(() => {
+    if (authLoading) return;
+    if (!user) return;
+
     const fetchProofs = async () => {
       try {
-        const res = await fetch(`${API}/proofs`);
+        const res = await fetch(`${API}/proofs?user_uid=${user.uid}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Failed to load proofs");
         setProofs(data.proofs || []);
@@ -41,7 +48,7 @@ export default function Dashboard() {
     };
 
     fetchProofs();
-  }, []);
+  }, [user, authLoading]);
 
   const filteredProofs = useMemo(() => {
     return proofs.filter((proof) => {
@@ -103,14 +110,18 @@ export default function Dashboard() {
 
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           {filteredProofs.map((proof) => (
-            <DocumentCard
-              key={proof.file_hash}
-              name={proof.filename || proof.title}
-              type={proof.doc_type}
-              date={proof.uploaded_at || "Unknown date"}
-              status="verified"
-              historyHref={`/history/${proof.document_id}`}
-            />
+          <DocumentCard
+            key={proof.file_hash}
+            name={proof.filename || proof.title}
+            type={proof.doc_type}
+            date={proof.uploaded_at || "Unknown date"}
+            status="verified"
+            historyHref={`/history/${proof.document_id}`}
+            canUploadLatest={profile?.role === "lawyer"}
+            latestVersionHref={`/upload?documentId=${proof.document_id}`}
+            canTransfer={profile?.role === "lawyer" && proof.owner_lawyer_uid === user?.uid}
+            transferHref={`/transfer/${proof.document_id}`}
+          />
           ))}
         </div>
       </AppShell>
