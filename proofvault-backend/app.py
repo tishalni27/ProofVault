@@ -9,6 +9,8 @@ from web3.middleware import ExtraDataToPOAMiddleware
 from werkzeug.utils import secure_filename
 import difflib
 from pypdf import PdfReader
+import io
+from supabase import create_client, Client
 
 app = Flask(__name__)
 CORS(app)
@@ -19,17 +21,23 @@ CHAIN_ID       = 18441
 WALLET_ADDRESS = "0x09862fe62d534A1E1E9981491cd845E7c4F86f8F"
 PRIVATE_KEY    = "e00a3b1061c9eaaf923a3d03fc3e5782398bef80860b58be9cf9c6ce78dc89f7"
 OPERATOR_REGISTRY = "0xb37c81eBC4b1B4bdD5476fe182D6C72133F41db9"
-CACHE_FILE     = os.path.join(os.path.dirname(__file__), "proofs.json")
 
 BASE_DIR       = os.path.dirname(__file__)
 DB_FILE        = os.path.join(BASE_DIR, "proofvault.db")
 UPLOAD_FOLDER  = os.path.join(BASE_DIR, "uploads")
 CACHE_FILE     = os.path.join(BASE_DIR, "proofs.json")
 RTDB_URL       = "https://proofvault-a11d3-default-rtdb.asia-southeast1.firebasedatabase.app/"
+
+SUPABASE_URL   = "https://wuqdwdobnaiywfguvdda.supabase.co"
+SUPABASE_KEY   = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind1cWR3ZG9ibmFpeXdmZ3V2ZGRhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTg4OTQ1MCwiZXhwIjoyMDkxNDY1NDUwfQ.CHC4NKYQa72yfSnA9vKw6CwKpJjisGogCKc9glm4N1A"
+SUPABASE_BUCKET = "documents"
 # ─────────────────────────────────────────────────────────────────────────────
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
-w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0) 
+w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
@@ -75,6 +83,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 # ── CACHE ─────────────────────────────────────────────────────────────────────
 
 def _load_cache() -> dict:
@@ -86,6 +95,59 @@ def _load_cache() -> dict:
 def _save_cache(cache: dict):
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
+
+
+# ── SUPABASE STORAGE HELPERS ──────────────────────────────────────────────────
+
+def supabase_upload(file_bytes: bytes, file_hash: str, ext: str) -> str:
+    """Upload file to Supabase Storage, return public URL."""
+    stored_name = f"{file_hash}{ext}"
+
+    # Check if already exists in Supabase (upsert)
+    try:
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
+            path=stored_name,
+            file=file_bytes,
+            file_options={"content-type": "application/pdf", "upsert": "true"}
+        )
+    except Exception as e:
+        # If file already exists that's fine, we just need the URL
+        pass
+
+    public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(stored_name)
+    return public_url
+
+
+def supabase_download(file_hash: str, ext: str) -> bytes:
+    """Download file bytes from Supabase Storage."""
+    stored_name = f"{file_hash}{ext}"
+    data = supabase.storage.from_(SUPABASE_BUCKET).download(stored_name)
+    return data
+
+
+def extract_pdf_text_from_bytes(file_bytes: bytes) -> str:
+    """Extract text from PDF bytes (no local file needed)."""
+    reader = PdfReader(io.BytesIO(file_bytes))
+    text_parts = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        text_parts.append(text)
+    return "\n".join(text_parts)
+
+
+def extract_pdf_text(path: str) -> str:
+    reader = PdfReader(path)
+    text_parts = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        text_parts.append(text)
+    return "\n".join(text_parts)
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -124,37 +186,6 @@ def _send_proof_tx(file_hash: str, title: str, doc_type: str):
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
     return tx_hash.hex(), receipt
 
-def _scan_chain_for_hash(file_hash: str, scan_blocks: int = 20_000) -> dict | None:
-    """
-    Fallback: scan recent blocks for a tx from our wallet to OperatorRegistry
-    whose data embeds the given file_hash.
-    """
-    account      = Web3.to_checksum_address(WALLET_ADDRESS).lower()
-    latest_block = w3.eth.block_number
-    from_block   = max(0, latest_block - scan_blocks)
-
-    for blk_num in range(latest_block, from_block - 1, -1):  # newest first
-        try:
-            blk = w3.eth.get_block(blk_num, full_transactions=True)
-        except Exception:
-            continue
-        for tx in blk.transactions:
-            if (tx.get("from", "").lower() == account and
-                    tx.get("to", "").lower() == account):
-                try:
-                    raw = bytes.fromhex(tx["input"][2:])
-                    p   = json.loads(raw.decode())
-                    if p.get("hash") == file_hash:
-                        return {
-                            "tx_hash":      tx["hash"].hex(),
-                            "block_number": blk_num,
-                            "timestamp":    blk["timestamp"],
-                            "title":        p.get("t", ""),
-                            "doc_type":     p.get("dt", ""),
-                        }
-                except Exception:
-                    continue
-    return None
 
 def _slugify(value: str) -> str:
     value = value.strip().lower()
@@ -200,18 +231,6 @@ def rtdb_delete(path: str):
     res.raise_for_status()
     return res.json()
 
-def extract_pdf_text(path: str) -> str:
-    reader = PdfReader(path)
-    text_parts = []
-
-    for page in reader.pages:
-        try:
-            text = page.extract_text() or ""
-        except Exception:
-            text = ""
-        text_parts.append(text)
-
-    return "\n".join(text_parts)
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 
@@ -226,71 +245,6 @@ def home():
     })
 
 
-# @app.route("/upload", methods=["POST"])
-# def upload():
-#     try:
-#         if "file" not in request.files:
-#             return jsonify({"error": "No file provided"}), 400
-
-#         f          = request.files["file"]
-#         file_bytes = f.read()
-#         file_hash  = _sha256(file_bytes)
-#         title      = request.form.get("title", f.filename)
-#         doc_type   = request.form.get("document_type", "Document")
-
-#         # Check if already stored
-#         cache = _load_cache()
-#         if file_hash in cache:
-#             entry = cache[file_hash]
-#             return jsonify({
-#                 "success":          True,
-#                 "already_existed":  True,
-#                 "filename":         f.filename,
-#                 "title":            entry["title"],
-#                 "document_type":    entry["doc_type"],
-#                 "file_hash":        file_hash,
-#                 "tx_hash":          entry["tx_hash"],
-#                 "block_number":     entry["block_number"],
-#                 "operator_registry": OPERATOR_REGISTRY,
-#             })
-
-#         # Send on-chain proof tx
-#         tx_hash, receipt = _send_proof_tx(file_hash, title, doc_type)
-
-#         if receipt.status != 1:
-#             return jsonify({"error": "Transaction failed on-chain", "tx_hash": tx_hash}), 500
-
-#         # Get block timestamp
-#         blk = w3.eth.get_block(receipt.blockNumber)
-#         ts  = blk["timestamp"]
-
-#         # Save to cache
-#         cache[file_hash] = {
-#             "tx_hash":      tx_hash,
-#             "block_number": receipt.blockNumber,
-#             "timestamp":    ts,
-#             "title":        title,
-#             "doc_type":     doc_type,
-#             "filename":     f.filename,
-#             "uploader":     WALLET_ADDRESS,
-#         }
-#         _save_cache(cache)
-
-#         return jsonify({
-#             "success":           True,
-#             "filename":          f.filename,
-#             "title":             title,
-#             "document_type":     doc_type,
-#             "file_hash":         file_hash,
-#             "tx_hash":           tx_hash,
-#             "block_number":      receipt.blockNumber,
-#             "uploaded_at":       _now_utc(ts),
-#             "operator_registry": OPERATOR_REGISTRY,
-#         })
-
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-
 @app.route("/upload", methods=["POST"])
 def upload():
     try:
@@ -304,15 +258,12 @@ def upload():
         title = request.form.get("title", f.filename)
         doc_type = request.form.get("document_type", "Document")
         filename = secure_filename(f.filename)
-
         ext = os.path.splitext(filename)[1].lower()
-        stored_name = f"{file_hash}{ext}"
-        stored_path = os.path.join(UPLOAD_FOLDER, stored_name)
 
-        with open(stored_path, "wb") as out:
-            out.write(file_bytes)
+        # ── Upload file to Supabase Storage ──
+        file_url = supabase_upload(file_bytes, file_hash, ext)
 
-        # duplicate by hash
+        # ── Duplicate check by hash ──
         existing_version_id = rtdb_get(f"hash_index/{file_hash}")
         if existing_version_id:
             existing = rtdb_get(f"document_versions/{existing_version_id}") or {}
@@ -327,7 +278,8 @@ def upload():
                 "block_number": existing.get("block_number"),
                 "uploaded_at": existing.get("uploaded_at"),
                 "version": existing.get("version_number", 1),
-                "document_id": existing.get("document_id")
+                "document_id": existing.get("document_id"),
+                "file_url": existing.get("file_url", file_url)
             })
 
         lookup_key = _document_lookup_key(title, doc_type)
@@ -365,11 +317,12 @@ def upload():
             "document_id": document_id,
             "version_number": version_number,
             "file_hash": file_hash,
+            "file_url": file_url,        # ← Supabase URL instead of local stored_path
+            "file_ext": ext,             # ← store ext for downloads
             "tx_hash": tx_hash,
             "block_number": block_number,
             "uploaded_at": uploaded_at,
             "filename": filename,
-            "stored_path": stored_path,
             "uploader": WALLET_ADDRESS,
             "previous_version_id": previous_version_id,
             "is_current": True,
@@ -389,6 +342,7 @@ def upload():
             "title": title,
             "document_type": doc_type,
             "file_hash": file_hash,
+            "file_url": file_url,
             "tx_hash": tx_hash,
             "block_number": block_number,
             "uploaded_at": uploaded_at,
@@ -399,7 +353,7 @@ def upload():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
 
 @app.route("/verify", methods=["POST"])
 def verify():
@@ -441,6 +395,7 @@ def verify():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/stats", methods=["GET"])
 def stats():
@@ -491,7 +446,8 @@ def list_proofs():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
+
 @app.route("/history/<document_id>", methods=["GET"])
 def history(document_id):
     try:
@@ -533,7 +489,7 @@ def history(document_id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
+
 
 @app.route("/file/<version_id>", methods=["GET"])
 def get_file(version_id):
@@ -542,18 +498,23 @@ def get_file(version_id):
         if not version:
             return jsonify({"error": "Version not found"}), 404
 
-        stored_path = version.get("stored_path")
-        if not stored_path or not os.path.exists(stored_path):
-            return jsonify({"error": "Stored file not found"}), 404
+        file_hash = version.get("file_hash")
+        ext = version.get("file_ext", ".pdf")
 
-        return send_file(stored_path, as_attachment=False)
+        # ── Download from Supabase Storage ──
+        file_bytes = supabase_download(file_hash, ext)
+
+        return send_file(
+            io.BytesIO(file_bytes),
+            mimetype="application/pdf",
+            as_attachment=False,
+            download_name=version.get("filename", f"{file_hash}{ext}")
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-    
 
-    
-    
+
 @app.route("/compare/<old_version_id>/<new_version_id>", methods=["GET"])
 def compare_versions(old_version_id, new_version_id):
     try:
@@ -563,17 +524,22 @@ def compare_versions(old_version_id, new_version_id):
         if not old_v or not new_v:
             return jsonify({"error": "One or both versions not found"}), 404
 
-        old_path = old_v.get("stored_path")
-        new_path = new_v.get("stored_path")
+        old_hash = old_v.get("file_hash")
+        new_hash = new_v.get("file_hash")
+        old_ext  = old_v.get("file_ext", ".pdf")
+        new_ext  = new_v.get("file_ext", ".pdf")
 
-        if not old_path or not os.path.exists(old_path):
-            return jsonify({"error": "Old version file not found"}), 404
+        if not old_hash:
+            return jsonify({"error": "Old version file hash missing"}), 404
+        if not new_hash:
+            return jsonify({"error": "New version file hash missing"}), 404
 
-        if not new_path or not os.path.exists(new_path):
-            return jsonify({"error": "New version file not found"}), 404
+        # ── Download both files from Supabase ──
+        old_bytes = supabase_download(old_hash, old_ext)
+        new_bytes = supabase_download(new_hash, new_ext)
 
-        old_text = extract_pdf_text(old_path)
-        new_text = extract_pdf_text(new_path)
+        old_text = extract_pdf_text_from_bytes(old_bytes)
+        new_text = extract_pdf_text_from_bytes(new_bytes)
 
         old_lines = old_text.splitlines()
         new_lines = new_text.splitlines()
@@ -603,6 +569,7 @@ def compare_versions(old_version_id, new_version_id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
