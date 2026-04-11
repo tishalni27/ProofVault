@@ -2,6 +2,7 @@
 
 import { useState, useRef } from "react";
 import AppShell from "@/components/AppShell";
+import ProtectedRoute from "@/components/ProtectedRoute";
 
 const API = "http://127.0.0.1:5001";
 
