@@ -1,4 +1,5 @@
-
+import requests
+import re
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from web3 import Web3
@@ -22,6 +23,7 @@ BASE_DIR       = os.path.dirname(__file__)
 DB_FILE        = os.path.join(BASE_DIR, "proofvault.db")
 UPLOAD_FOLDER  = os.path.join(BASE_DIR, "uploads")
 CACHE_FILE     = os.path.join(BASE_DIR, "proofs.json")
+RTDB_URL       = "https://proofvault-a11d3-default-rtdb.asia-southeast1.firebasedatabase.app/"
 # ─────────────────────────────────────────────────────────────────────────────
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
@@ -152,6 +154,49 @@ def _scan_chain_for_hash(file_hash: str, scan_blocks: int = 20_000) -> dict | No
                     continue
     return None
 
+def _slugify(value: str) -> str:
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-")
+
+
+def _document_lookup_key(title: str, doc_type: str) -> str:
+    return f"{_slugify(title)}__{_slugify(doc_type)}"
+
+
+def rtdb_get(path: str):
+    url = f"{RTDB_URL}/{path}.json"
+    res = requests.get(url, timeout=20)
+    res.raise_for_status()
+    return res.json()
+
+
+def rtdb_put(path: str, data):
+    url = f"{RTDB_URL}/{path}.json"
+    res = requests.put(url, json=data, timeout=20)
+    res.raise_for_status()
+    return res.json()
+
+
+def rtdb_patch(path: str, data):
+    url = f"{RTDB_URL}/{path}.json"
+    res = requests.patch(url, json=data, timeout=20)
+    res.raise_for_status()
+    return res.json()
+
+
+def rtdb_post(path: str, data):
+    url = f"{RTDB_URL}/{path}.json"
+    res = requests.post(url, json=data, timeout=20)
+    res.raise_for_status()
+    return res.json()
+
+
+def rtdb_delete(path: str):
+    url = f"{RTDB_URL}/{path}.json"
+    res = requests.delete(url, timeout=20)
+    res.raise_for_status()
+    return res.json()
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
 
@@ -243,93 +288,77 @@ def upload():
 
         title = request.form.get("title", f.filename)
         doc_type = request.form.get("document_type", "Document")
-
-        # Save file locally
         filename = secure_filename(f.filename)
-        ext = os.path.splitext(filename)[1]
-        stored_name = f"{file_hash}{ext}"
-        stored_path = os.path.join(UPLOAD_FOLDER, stored_name)
-        print("DEBUG upload path:", stored_path)
 
-        with open(stored_path, "wb") as out:
-            out.write(file_bytes)
+        # duplicate by hash
+        existing_version_id = rtdb_get(f"hash_index/{file_hash}")
+        if existing_version_id:
+            existing = rtdb_get(f"document_versions/{existing_version_id}") or {}
+            return jsonify({
+                "success": True,
+                "already_existed": True,
+                "filename": existing.get("filename", filename),
+                "title": title,
+                "document_type": doc_type,
+                "file_hash": file_hash,
+                "tx_hash": existing.get("tx_hash", ""),
+                "block_number": existing.get("block_number"),
+                "uploaded_at": existing.get("uploaded_at"),
+                "version": existing.get("version_number", 1),
+                "document_id": existing.get("document_id")
+            })
 
-        print("DEBUG file saved:", os.path.exists(stored_path), stored_path)
+        lookup_key = _document_lookup_key(title, doc_type)
+        document_id = rtdb_get(f"document_lookup/{lookup_key}")
 
-        conn = get_db()
-        cur = conn.cursor()
+        previous_version_id = None
+        version_number = 1
 
-        # Check if document already exists (by title + type)
-        cur.execute(
-            "SELECT * FROM documents WHERE title=? AND document_type=?",
-            (title, doc_type),
-        )
-        doc = cur.fetchone()
-
-        if doc:
-            document_id = doc["id"]
-
-            # Get latest version
-            cur.execute(
-                "SELECT * FROM document_versions WHERE document_id=? AND is_current=1",
-                (document_id,),
-            )
-            prev = cur.fetchone()
-
-            version_number = prev["version_number"] + 1 if prev else 1
-            previous_version_id = prev["id"] if prev else None
-
-            # mark old version as not current
-            if prev:
-                cur.execute(
-                    "UPDATE document_versions SET is_current=0 WHERE id=?",
-                    (prev["id"],),
-                )
-
+        if not document_id:
+            created = rtdb_post("documents", {
+                "title": title,
+                "document_type": doc_type,
+                "created_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "current_version_id": None
+            })
+            document_id = created["name"]
+            rtdb_put(f"document_lookup/{lookup_key}", document_id)
         else:
-            # create new document
-            cur.execute(
-                "INSERT INTO documents (title, document_type, created_at) VALUES (?, ?, ?)",
-                (title, doc_type, datetime.utcnow().isoformat()),
-            )
-            document_id = cur.lastrowid
-            version_number = 1
-            previous_version_id = None
+            doc = rtdb_get(f"documents/{document_id}") or {}
+            previous_version_id = doc.get("current_version_id")
+            if previous_version_id:
+                prev = rtdb_get(f"document_versions/{previous_version_id}") or {}
+                version_number = int(prev.get("version_number", 1)) + 1
+                rtdb_patch(f"document_versions/{previous_version_id}", {"is_current": False})
 
-        # send blockchain proof
         tx_hash, receipt = _send_proof_tx(file_hash, title, doc_type)
-
         if receipt.status != 1:
             return jsonify({"error": "Transaction failed"}), 500
 
         block_number = receipt.blockNumber
         blk = w3.eth.get_block(block_number)
-        ts = blk["timestamp"]
+        uploaded_at = _now_utc(blk["timestamp"])
 
-        # insert version
-        cur.execute(
-            """
-            INSERT INTO document_versions
-            (document_id, version_number, file_hash, tx_hash, block_number,
-             uploaded_at, filename, stored_path, uploader, previous_version_id, is_current)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-            """,
-            (
-                document_id,
-                version_number,
-                file_hash,
-                tx_hash,
-                block_number,
-                _now_utc(ts),
-                filename,
-                stored_path,
-                WALLET_ADDRESS,
-                previous_version_id,
-            ),
-        )
+        version_payload = {
+            "document_id": document_id,
+            "version_number": version_number,
+            "file_hash": file_hash,
+            "tx_hash": tx_hash,
+            "block_number": block_number,
+            "uploaded_at": uploaded_at,
+            "filename": filename,
+            "uploader": WALLET_ADDRESS,
+            "previous_version_id": previous_version_id,
+            "is_current": True,
+            "status": "registered"
+        }
 
-        conn.commit()
-        conn.close()
+        created_ver = rtdb_post("document_versions", version_payload)
+        version_id = created_ver["name"]
+
+        rtdb_put(f"document_versions_by_document/{document_id}/{version_id}", True)
+        rtdb_put(f"hash_index/{file_hash}", version_id)
+        rtdb_patch(f"documents/{document_id}", {"current_version_id": version_id})
 
         return jsonify({
             "success": True,
@@ -339,12 +368,15 @@ def upload():
             "file_hash": file_hash,
             "tx_hash": tx_hash,
             "block_number": block_number,
-            "uploaded_at": _now_utc(ts),
+            "uploaded_at": uploaded_at,
             "version": version_number,
+            "document_id": document_id,
+            "version_id": version_id
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
 
 @app.route("/verify", methods=["POST"])
 def verify():
@@ -352,44 +384,40 @@ def verify():
         if "file" not in request.files:
             return jsonify({"error": "No file provided"}), 400
 
-        f          = request.files["file"]
+        f = request.files["file"]
         file_bytes = f.read()
-        file_hash  = _sha256(file_bytes)
+        file_hash = _sha256(file_bytes)
 
-        # 1. Fast path: local cache
-        cache = _load_cache()
-        entry = cache.get(file_hash)
-
-        # 2. Slow fallback: scan chain
-        if not entry:
-            entry = _scan_chain_for_hash(file_hash)
-
-        if entry:
-            ts = entry.get("timestamp", 0)
+        version_id = rtdb_get(f"hash_index/{file_hash}")
+        if not version_id:
             return jsonify({
-                "filename":        f.filename,
-                "file_hash":       file_hash,
-                "exists_on_chain": True,
-                "block_number":    entry.get("block_number"),
-                "timestamp":       ts,
-                "uploaded_at":     _now_utc(ts) if ts else None,
-                "uploader":        entry.get("uploader", WALLET_ADDRESS),
-                "document_title":  entry.get("title", ""),
-                "document_type":   entry.get("doc_type", ""),
-                "tx_hash":         entry.get("tx_hash", ""),
-                "verdict":         " AUTHENTIC — hash matches blockchain record",
-            })
-        else:
-            return jsonify({
-                "filename":        f.filename,
-                "file_hash":       file_hash,
+                "filename": f.filename,
+                "file_hash": file_hash,
                 "exists_on_chain": False,
-                "verdict":         " NOT FOUND — no blockchain record for this file",
+                "verdict": "NOT FOUND — no blockchain record for this file"
             })
+
+        version = rtdb_get(f"document_versions/{version_id}") or {}
+        document_id = version.get("document_id")
+        doc = rtdb_get(f"documents/{document_id}") or {}
+
+        return jsonify({
+            "filename": f.filename,
+            "file_hash": file_hash,
+            "exists_on_chain": True,
+            "block_number": version.get("block_number"),
+            "uploaded_at": version.get("uploaded_at"),
+            "uploader": version.get("uploader"),
+            "document_title": doc.get("title", ""),
+            "document_type": doc.get("document_type", ""),
+            "tx_hash": version.get("tx_hash", ""),
+            "document_id": document_id,
+            "version_id": version_id,
+            "verdict": "AUTHENTIC — hash matches blockchain record"
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
 
 @app.route("/stats", methods=["GET"])
 def stats():
@@ -409,27 +437,79 @@ def stats():
 
 @app.route("/proofs", methods=["GET"])
 def list_proofs():
-    """List all uploaded proofs (for demo/frontend use)."""
     try:
-        cache = _load_cache()
+        documents = rtdb_get("documents") or {}
         proofs = []
-        for file_hash, entry in cache.items():
-            ts = entry.get("timestamp", 0)
+
+        for document_id, doc in documents.items():
+            current_version_id = doc.get("current_version_id")
+            if not current_version_id:
+                continue
+
+            version = rtdb_get(f"document_versions/{current_version_id}")
+            if not version:
+                continue
+
             proofs.append({
-                "file_hash":    file_hash,
-                "title":        entry.get("title", ""),
-                "doc_type":     entry.get("doc_type", ""),
-                "filename":     entry.get("filename", ""),
-                "uploaded_at":  _now_utc(ts) if ts else None,
-                "block_number": entry.get("block_number"),
-                "tx_hash":      entry.get("tx_hash", ""),
+                "document_id": document_id,
+                "file_hash": version.get("file_hash"),
+                "title": doc.get("title", ""),
+                "doc_type": doc.get("document_type", ""),
+                "filename": version.get("filename", ""),
+                "uploaded_at": version.get("uploaded_at"),
+                "block_number": version.get("block_number"),
+                "tx_hash": version.get("tx_hash", ""),
+                "version_number": version.get("version_number", 1)
             })
-        # Sort newest first
+
         proofs.sort(key=lambda x: x.get("block_number") or 0, reverse=True)
+
         return jsonify({"total": len(proofs), "proofs": proofs})
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@app.route("/history/<document_id>", methods=["GET"])
+def history(document_id):
+    try:
+        doc = rtdb_get(f"documents/{document_id}")
+        if not doc:
+            return jsonify({"error": "Document not found"}), 404
 
+        version_map = rtdb_get(f"document_versions_by_document/{document_id}") or {}
+        versions = []
+
+        for version_id in version_map.keys():
+            version = rtdb_get(f"document_versions/{version_id}")
+            if not version:
+                continue
+
+            versions.append({
+                "version_id": version_id,
+                "version_number": version.get("version_number", 1),
+                "file_hash": version.get("file_hash"),
+                "tx_hash": version.get("tx_hash"),
+                "block_number": version.get("block_number"),
+                "uploaded_at": version.get("uploaded_at"),
+                "filename": version.get("filename"),
+                "uploader": version.get("uploader"),
+                "previous_version_id": version.get("previous_version_id"),
+                "is_current": version.get("is_current", False),
+                "status": version.get("status", "registered")
+            })
+
+        versions.sort(key=lambda x: x.get("version_number", 0), reverse=True)
+
+        return jsonify({
+            "document_id": document_id,
+            "title": doc.get("title", ""),
+            "document_type": doc.get("document_type", ""),
+            "current_version_id": doc.get("current_version_id"),
+            "versions": versions
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 

@@ -7,6 +7,7 @@ import DocumentCard from "@/components/DocumentCard";
 const API = "http://127.0.0.1:5001";
 
 type Proof = {
+  document_id: string;
   file_hash: string;
   title: string;
   doc_type: string;
@@ -14,6 +15,7 @@ type Proof = {
   uploaded_at: string | null;
   block_number: number;
   tx_hash: string;
+  version_number?: number;
 };
 
 export default function Dashboard() {
@@ -105,7 +107,7 @@ export default function Dashboard() {
             type={proof.doc_type}
             date={proof.uploaded_at || "Unknown date"}
             status="verified"
-            historyHref={`/history/${encodeURIComponent(proof.title || proof.filename)}`}
+            historyHref={`/history/${proof.document_id}`}
           />
         ))}
       </div>
